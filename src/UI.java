@@ -9,7 +9,7 @@ public class UI implements Runnable{
 
     @Override
     public void run() {
-        mainFrame = new JFrame("Doom Java");
+        mainFrame = new JFrame("3D Effects");
         mainFrame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         mainPanel = new MainPanel();
         keyBoard = new KeyBoard(mainPanel);
