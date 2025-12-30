@@ -9,6 +9,9 @@ import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.awt.event.ComponentAdapter;
 import java.awt.event.ComponentEvent;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 public class MainPanel extends JPanel implements ActionListener {
     private final GraphStorage storage = GraphStorage.getInstance();
@@ -67,6 +70,8 @@ public class MainPanel extends JPanel implements ActionListener {
         g2d.setColor(new Color(70, 70, 70));
         g2d.fillRect(0, 0, screenW, screenH);
 
+        double[] zBuffer = new double[screenW];
+
         for (int col = 0; col < screenW; col++) {
             double rayAngle = (rad - fov * 0.5) + ((double) col / (double) screenW) * fov;
             double raySin = Math.sin(rayAngle);
@@ -96,6 +101,8 @@ public class MainPanel extends JPanel implements ActionListener {
             }
 
             double perpendicular = hit ? distance * Math.cos(rayAngle - rad) : maxDepth;
+            zBuffer[col] = perpendicular;
+
             double clampedDist = Math.max(perpendicular, 0.0001);
             int wallHeight = (int) (screenH / clampedDist);
             // Keep walls starting at the top; only reduce their visible height to show more floor.
@@ -114,7 +121,7 @@ public class MainPanel extends JPanel implements ActionListener {
             }
         }
 
-        drawCollectables(g2d, screenW, screenH, rad, fov);
+        drawCollectables(g2d, screenW, screenH, rad, fov, zBuffer, verticalOffset);
     }
 
     private Color colorForWall(int tileValue) {
@@ -187,32 +194,164 @@ public class MainPanel extends JPanel implements ActionListener {
         miniMap.handleParentResize();
     }
 
-    private void drawCollectables(Graphics2D g2d, int screenW, int screenH, double playerRad, double fov) {
-        for (CollectableObject obj : collection.getWorldObjects()) {
+    private void drawCollectables(Graphics2D g2d, int screenW, int screenH, double playerRad, double fov, double[] zBuffer, int verticalOffset) {
+        List<CollectableObject> objects = new ArrayList<>(collection.getWorldObjects());
+        objects.sort((o1, o2) -> {
+            double d1 = Math.pow(o1.getX() - posX, 2) + Math.pow(o1.getY() - posY, 2);
+            double d2 = Math.pow(o2.getX() - posX, 2) + Math.pow(o2.getY() - posY, 2);
+            return Double.compare(d2, d1);
+        });
+
+        double objSize = 0.5; // side length of the cube in world units
+
+        for (CollectableObject obj : objects) {
             if (obj.isCollected()) continue;
 
-            double dx = (obj.getX() + 0.5) - posX;
-            double dy = (obj.getY() + 0.5) - posY;
-            double distance = Math.sqrt(dx * dx + dy * dy);
-            double objAngle = Math.atan2(dy, dx);
-            double diff = normalizeAngle(objAngle - playerRad);
+            double centerX = obj.getX() + 0.5;
+            double centerY = obj.getY() + 0.5;
+            double dx = centerX - posX;
+            double dy = centerY - posY;
+            double distance = Math.hypot(dx, dy);
+            // Don't render if too close (will be collected soon anyway)
+            if (distance < 0.8) continue;
 
-            // Direction from cube toward player, normalized; used to decide which faces are visible.
-            double toPlayerX = -dx;
-            double toPlayerY = -dy;
-            double len = Math.max(0.0001, Math.hypot(toPlayerX, toPlayerY));
-            toPlayerX /= len;
-            toPlayerY /= len;
+            double angleToObj = Math.atan2(dy, dx);
+            double relAngle = normalizeAngle(angleToObj - playerRad);
+            if (Math.abs(relAngle) > fov * 0.6) continue;
 
-            if (Math.abs(diff) > fov * 0.6) continue;
+            double half = objSize * 0.5;
+            double minX = centerX - half;
+            double maxX = centerX + half;
+            double minY = centerY - half;
+            double maxY = centerY + half;
 
-            double screenX = (diff / fov + 0.5) * screenW;
-            int size = (int) Math.max(6, 160 / Math.max(distance, 0.1));
-            int x = (int) Math.round(screenX - size * 0.5);
-            int y = screenH / 2 - size / 2;
+            // Track per-column top edges to build a proper top-face polygon
+            int[] topEdgeY = new int[screenW];
+            int[] topEdgeFarY = new int[screenW];
+            boolean[] columnVisible = new boolean[screenW];
+            int leftCol = -1, rightCol = -1;
 
-            // Keep cube orientation fixed in world; side visibility depends on where the player stands
-            drawCube(g2d, obj.getColor(), x, y, size, toPlayerX, toPlayerY);
+            for (int col = 0; col < screenW; col++) {
+                double rayAngle = (playerRad - fov * 0.5) + ((double) col / (double) screenW) * fov;
+                double rayDirX = Math.cos(rayAngle);
+                double rayDirY = Math.sin(rayAngle);
+
+                double tNear = Double.NEGATIVE_INFINITY;
+                double tFar = Double.POSITIVE_INFINITY;
+                int hitFace = 0;
+
+                // X slabs
+                if (Math.abs(rayDirX) < 1e-9) {
+                    if (posX < minX || posX > maxX) continue;
+                } else {
+                    double t1 = (minX - posX) / rayDirX;
+                    double t2 = (maxX - posX) / rayDirX;
+                    double tEnter = Math.min(t1, t2);
+                    double tExit = Math.max(t1, t2);
+                    if (tEnter > tNear) {
+                        tNear = tEnter;
+                        hitFace = (t1 < t2) ? -1 : 1;
+                    }
+                    tFar = Math.min(tFar, tExit);
+                }
+
+                // Y slabs
+                if (Math.abs(rayDirY) < 1e-9) {
+                    if (posY < minY || posY > maxY) continue;
+                } else {
+                    double t1 = (minY - posY) / rayDirY;
+                    double t2 = (maxY - posY) / rayDirY;
+                    double tEnter = Math.min(t1, t2);
+                    double tExit = Math.max(t1, t2);
+                    if (tEnter > tNear) {
+                        tNear = tEnter;
+                        hitFace = (t1 < t2) ? -2 : 2;
+                    }
+                    tFar = Math.min(tFar, tExit);
+                }
+
+                if (tNear > tFar || tFar < 0 || tNear <= 0) continue;
+
+                double perpNear = tNear * Math.cos(rayAngle - playerRad);
+                if (perpNear <= 0.8) continue;
+                if (perpNear >= zBuffer[col]) continue;
+
+                int fullWallHeightNear = (int) (screenH / perpNear);
+                int wallBottomNear = Math.min(screenH - 1, fullWallHeightNear + verticalOffset);
+                int objHeight = Math.max(2, (int) (fullWallHeightNear * objSize));
+                int objTopNear = Math.max(0, wallBottomNear - objHeight);
+
+                if (wallBottomNear <= objTopNear) continue;
+
+                double perpFar = tFar * Math.cos(rayAngle - playerRad);
+                perpFar = Math.max(perpFar, 0.8);
+                int fullWallHeightFar = (int) (screenH / perpFar);
+                int wallBottomFar = Math.min(screenH - 1, fullWallHeightFar + verticalOffset);
+                int objHeightFar = Math.max(2, (int) (fullWallHeightFar * objSize));
+                int objTopFar = Math.max(0, wallBottomFar - objHeightFar);
+
+                // Track top edge for top face
+                topEdgeY[col] = objTopNear;
+                topEdgeFarY[col] = objTopFar;
+                columnVisible[col] = true;
+                if (leftCol < 0) leftCol = col;
+                rightCol = col;
+
+                Color faceColor = obj.getColor();
+                switch (hitFace) {
+                    case 1:
+                        faceColor = faceColor.darker();
+                        break;
+                    case -1:
+                        faceColor = new Color(
+                            Math.max(0, faceColor.getRed() - 40),
+                            Math.max(0, faceColor.getGreen() - 40),
+                            Math.max(0, faceColor.getBlue() - 40)
+                        );
+                        break;
+                    case 2:
+                        break;
+                    case -2:
+                        faceColor = faceColor.brighter();
+                        break;
+                    default:
+                        break;
+                }
+                double shade = Math.max(0.3, 1.0 / (1.0 + perpNear * 0.08));
+                g2d.setColor(applyShade(faceColor, shade));
+                g2d.drawLine(col, objTopNear, col, wallBottomNear);
+            }
+
+            if (leftCol >= 0 && rightCol > leftCol) {
+                int visibleCount = 0;
+                for (int col = leftCol; col <= rightCol; col++) {
+                    if (columnVisible[col]) visibleCount++;
+                }
+
+                if (visibleCount > 1) {
+                    int[] xPts = new int[visibleCount * 2];
+                    int[] yPts = new int[visibleCount * 2];
+                    int idx = 0;
+
+                    for (int col = leftCol; col <= rightCol; col++) {
+                        if (!columnVisible[col]) continue;
+                        xPts[idx] = col;
+                        yPts[idx] = topEdgeY[col];
+                        idx++;
+                    }
+                    for (int col = rightCol; col >= leftCol; col--) {
+                        if (!columnVisible[col]) continue;
+                        xPts[idx] = col;
+                        yPts[idx] = Math.min(topEdgeY[col], topEdgeFarY[col]);
+                        idx++;
+                    }
+
+                    Color topColor = obj.getColor().brighter();
+                    double shade = Math.max(0.5, 1.0 / (1.0 + distance * 0.06));
+                    g2d.setColor(applyShade(topColor, shade));
+                    g2d.fillPolygon(xPts, yPts, idx);
+                }
+            }
         }
     }
 
@@ -226,7 +365,8 @@ public class MainPanel extends JPanel implements ActionListener {
             double dy = (obj.getY() + 0.5) - posY;
             double distance = Math.sqrt(dx * dx + dy * dy);
 
-            if (distance < 0.6) {
+            // Collect when very close
+            if (distance < 0.5) {
                 collection.collect(obj);
             }
         }
@@ -241,38 +381,5 @@ public class MainPanel extends JPanel implements ActionListener {
         while (angle > Math.PI) angle -= Math.PI * 2.0;
         while (angle < -Math.PI) angle += Math.PI * 2.0;
         return angle;
-    }
-
-    private void drawCube(Graphics2D g2d, Color base, int x, int y, int size, double toPlayerX, double toPlayerY) {
-        // toPlayerX/Y: normalized vector from cube center toward player.
-        int depthX = (int) Math.round(toPlayerX * size * 0.4);
-        int depthY = (int) Math.round(toPlayerY * size * 0.4);
-
-        int fx0 = x;
-        int fx1 = x + size;
-        int fy0 = y;
-        int fy1 = y + size;
-
-        int[] frontX = {fx0, fx1, fx1, fx0};
-        int[] frontY = {fy0, fy0, fy1, fy1};
-        double frontShade = 0.35 + 0.55 * ((toPlayerX * 0.5) + 0.5);
-        g2d.setColor(applyShade(base, frontShade));
-        g2d.fillPolygon(frontX, frontY, 4);
-
-        int[] sideX = {fx1, fx1 - depthX, fx1 - depthX, fx1};
-        int[] sideY = {fy0, fy0 - depthY, fy1 - depthY, fy1};
-        double sideShade = 0.45 + 0.35 * ((toPlayerY * 0.5) + 0.5);
-        g2d.setColor(applyShade(base, sideShade));
-        g2d.fillPolygon(sideX, sideY, 4);
-
-        int[] topX = {fx0, fx0 - depthX, fx1 - depthX, fx1};
-        int[] topY = {fy0, fy0 - depthY, fy0 - depthY, fy0};
-        g2d.setColor(applyShade(base, 0.7));
-        g2d.fillPolygon(topX, topY, 4);
-
-        g2d.setColor(Color.BLACK);
-        g2d.drawPolygon(frontX, frontY, 4);
-        g2d.drawPolygon(sideX, sideY, 4);
-        g2d.drawPolygon(topX, topY, 4);
     }
 }
