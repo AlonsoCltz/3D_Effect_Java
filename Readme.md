@@ -10,7 +10,8 @@ This project simulates a classic Doom-like 3D effect using 2D drawing tools in J
 - **Map Storage:** Maps are stored as text files in the `mapStorage` directory. Each number represents a color or wall type (0 is reserved for the floor).
 - **Mini Map:** Shows explored paths. Click to enlarge or close the mini map for better navigation.
 ![Screenshot](assets/MapExp.png "Map view")
-- **Collectable Objects:** Items appear in the scene and can be collected. Collected items disappear from the map and are stored in the player's bag (an ArrayList).
+- **Collectable Objects:** Items appear in the scene and can be collected. Collected items disappear from the map and are stored in the player's bag (an ArrayList).<br>
+The hit box have not be implemented; thus the cube might be transparent when the user touches it but have not collect.
 ![Screenshot](assets/CollectableObjectExp.png "Object view")
 - **Customizable Levels:** Easily modify or add new maps by editing or adding files in `mapStorage`.
 
